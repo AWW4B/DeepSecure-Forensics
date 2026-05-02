@@ -142,5 +142,4 @@ tensorboard/
 # GIT-SPECIFIC                 #
 ################################
 .git/
-.gitmodules
 .github/
