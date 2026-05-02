@@ -1,0 +1,146 @@
+################################
+# PYTHON & PACKAGE MANAGEMENT  #
+################################
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg-info
+
+# Virtual environments
+.venv/
+venv/
+env/
+.conda/
+ENV/
+
+# Package managers
+.pip-cache/
+pip-log.txt
+pip-delete-this-directory.txt
+
+################################
+# JUPYTER NOTEBOOKS & IDEs     #
+################################
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+.jupyter/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+################################
+# CACHING & BUILD TOOLS        #
+################################
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.cache/
+.coverage
+htmlcov/
+
+################################
+# OS & SYSTEM FILES            #
+################################
+.DS_Store
+Thumbs.db
+desktop.ini
+.directory
+$RECYCLE.BIN/
+*.tmp
+
+################################
+# BACKUP & TEMPORARY FILES     #
+################################
+*.bak
+*.bak_*
+*.backup
+*_tmp/
+_tmp/
+tmp/
+temp/
+
+################################
+# LOGS                         #
+################################
+*.log
+*.out
+logs/
+*.loglevel
+debug.log
+
+################################
+# LARGE DATASETS (Git-hostile) #
+################################
+Datasets/
+*.zip
+LA.zip
+*.tar
+*.tar.gz
+*.rar
+UniversalFakeDetect/dataset_part1/
+
+# Data directories (any size)
+data/
+raw_data/
+**/data/
+**/*_data/
+
+################################
+# MODEL WEIGHTS & CHECKPOINTS  #
+################################
+# PyTorch weights
+*.pth
+*.pt
+*.pth.tar
+
+# TensorFlow/Keras weights
+*.h5
+*.hdf5
+*.ckpt
+
+# ONNX and other model formats
+*.onnx
+*.tflite
+
+# Numpy/Pickle arrays
+*.npy
+*.npz
+*.pkl
+*.pickle
+
+# Model cache directories
+**/weights/
+**/checkpoints/
+**/pretrained/
+**/pretrained_models/
+aasist/models/weights/
+MeGA/model/weights/
+**/models/
+
+################################
+# EXPERIMENT & GENERATED FILES #
+################################
+_tmp/
+**/results/
+**/*_results/
+
+# Checkpoint directories
+**/checkpoints/
+
+# Logs from training
+runs/
+tensorboard/
+
+################################
+# GIT-SPECIFIC                 #
+################################
+.git/
+.gitmodules
+.github/
