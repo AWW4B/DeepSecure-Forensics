@@ -1,9 +1,14 @@
-# Datasets
-datasets/Deepfake-Eval-2024/audio-data/
-datasets/Deepfake-Eval-2024/.cache/
-datasets/in_the_wild_test/
-datasets/la_test/fake/
-datasets/la_test/real/
+# Datasets - ignore audio files but keep CSVs and structure
+datasets/Deepfake-Eval-2024/audio-data/*
+!datasets/Deepfake-Eval-2024/audio-data/.gitkeep
+
+datasets/in_the_wild_test/*
+!datasets/in_the_wild_test/.gitkeep
+!datasets/in_the_wild_test/meta.csv
+
+datasets/la_test/*
+!datasets/la_test/meta.csv
+!datasets/la_test/.gitkeep
 
 # Model weights
 **/*.pth
