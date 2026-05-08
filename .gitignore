@@ -1,143 +1,30 @@
-# Ignore cache
+# Datasets
+datasets/Deepfake-Eval-2024/audio-data/
 datasets/Deepfake-Eval-2024/.cache/
+datasets/in_the_wild_test/
+datasets/la_test/fake/
+datasets/la_test/real/
 
-# Ignore all data files inside these directories
-datasets/Deepfake-Eval-2024/audio-data/*
-datasets/Deepfake-Eval-2024/in_the_wild_test/*
-datasets/Deepfake-Eval-2024/la_test/fake/*
-datasets/Deepfake-Eval-2024/la_test/real/*
+# Model weights
+**/*.pth
 
-# EXCEPTIONS: Do not ignore .csv files in these directories
-!datasets/Deepfake-Eval-2024/audio-data/*.csv
-!datasets/Deepfake-Eval-2024/la_test/*.csv
-
-# EXCEPTIONS: Do not ignore the .gitkeep files (keeps the folder structure)
-!datasets/Deepfake-Eval-2024/audio-data/.gitkeep
-!datasets/Deepfake-Eval-2024/in_the_wild_test/.gitkeep
-!datasets/Deepfake-Eval-2024/la_test/fake/.gitkeep
-!datasets/Deepfake-Eval-2024/la_test/real/.gitkeep
-
-
-################################
-# GLOBAL AUDIO BAN             #
-################################
-*.wav
-*.flac
-*.mp3
-*.ogg
-*.m4a
-*.au
-
-################################
-# PYTHON & PACKAGE MANAGEMENT  #
-################################
+# Python
 __pycache__/
 *.py[cod]
-*.so
+*.pyo
+*.pyd
+.Python
 *.egg
 *.egg-info/
-.eggs/
 dist/
 build/
-*.egg-info
-
-# Virtual environments
-.venv/
-venv/
+.env
+.venv
 env/
-.conda/
-ENV/
+venv/
+.ipynb_checkpoints/
+*.log
 
-# Package managers
-.pip-cache/
-pip-log.txt
-pip-delete-this-directory.txt
-
-################################
-# JUPYTER NOTEBOOKS & IDEs     #
-################################
-
-.jupyter/
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-################################
-# CACHING & BUILD TOOLS        #
-################################
-.mypy_cache/
-.pytest_cache/
-.ruff_cache/
-.cache/
-.coverage
-htmlcov/
-
-################################
-# OS & SYSTEM FILES            #
-################################
+# OS
 .DS_Store
 Thumbs.db
-desktop.ini
-.directory
-$RECYCLE.BIN/
-*.tmp
-
-################################
-# BACKUP & TEMPORARY FILES     #
-################################
-*.bak
-*.bak_*
-*.backup
-*_tmp/
-_tmp/
-tmp/
-temp/
-
-################################
-# LOGS                         #
-################################
-*.log
-*.out
-logs/
-*.loglevel
-debug.log
-
-################################
-# LARGE DATASETS (Git-hostile) #
-################################
-Datasets/
-*.zip
-LA.zip
-*.tar
-*.tar.gz
-*.rar
-UniversalFakeDetect/dataset_part1/
-
-
-
-# TensorFlow/Keras weights
-*.h5
-*.hdf5
-*.ckpt
-
-# ONNX and other model formats
-*.onnx
-*.tflite
-
-# Numpy/Pickle arrays
-*.npy
-*.npz
-*.pkl
-*.pickle
-
-# Logs from training
-runs/
-tensorboard/
-
-################################
-# GIT-SPECIFIC                 #
-################################
-.git/
-.github/
