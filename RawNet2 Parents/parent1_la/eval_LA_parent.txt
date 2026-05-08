@@ -1,0 +1,44 @@
+(.venv) PS D:\1230079\New folder\rawnet2-antispoofing> python test_all.py --model_path models/model_logical_weighted_CCE_100_32_0.0001/best_model.pth
+Using device: CUDA
+Model loaded successfully.
+Creating a fast 1000-sample balanced LA dataset...
+Copying 500 Real files...
+Copying 500 Fake files...
+Successfully created subset at LA_small_test with 1000 total files.
+
+
+Evaluating ASVSpoof_LA_Small (1000 files)...
+Processed 1000/1000 | Skipped (unreadable): 0
+
+========================================
+RESULTS FOR: ASVSpoof_LA_Small
+========================================
+Accuracy  : 95.20%
+AUC       : 0.9820
+Precision : 0.9216
+Recall    : 0.9880
+F1 Score  : 0.9537
+========================================
+
+Saved plots and JSON metrics to test_results
+
+Evaluating Deepfake_Eval_2024 (1980 files)...
+Processed 64/1980 | Skipped (unreadable): 0[C:\vcpkg\buildtrees\mpg123\src\-66150af195.clean\src\libmpg123\parse.c:skip_junk():1300] error: Giving up searching valid MPEG header after 65536 bytes of junk.
+[C:\vcpkg\buildtrees\mpg123\src\-66150af195.clean\src\libmpg123\parse.c:skip_junk():1300] error: Giving up searching valid MPEG header after 65536 bytes of junk.
+Processed 1152/1980 | Skipped (unreadable): 0[C:\vcpkg\buildtrees\mpg123\src\-66150af195.clean\src\libmpg123\id3.c:INT123_id3_to_utf8():394] warning: Weird tag size 93 for encoding 1 - I will probably trim too early or something but I think the MP3 is broken.
+Processed 1980/1980 | Skipped (unreadable): 0
+
+========================================
+RESULTS FOR: Deepfake_Eval_2024
+========================================
+Accuracy  : 55.30%
+AUC       : 0.6074
+Precision : 0.6671
+Recall    : 0.4824
+F1 Score  : 0.5599
+========================================
+
+Saved plots and JSON metrics to test_results
+
+All done! Results saved to D:\1230079\New folder\rawnet2-antispoofing\test_results
+(.venv) PS D:\1230079\New folder\rawnet2-antispoofing> 

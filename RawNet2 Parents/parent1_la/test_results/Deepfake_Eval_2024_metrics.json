@@ -1,0 +1,8 @@
+{
+    "Dataset": "Deepfake_Eval_2024",
+    "Accuracy_percentage": 55.303,
+    "AUC": 0.6074,
+    "Precision": 0.6671,
+    "Recall": 0.4824,
+    "F1_Score": 0.5599
+}

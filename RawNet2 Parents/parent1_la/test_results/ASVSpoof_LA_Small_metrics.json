@@ -1,0 +1,8 @@
+{
+    "Dataset": "ASVSpoof_LA_Small",
+    "Accuracy_percentage": 95.2,
+    "AUC": 0.982,
+    "Precision": 0.9216,
+    "Recall": 0.988,
+    "F1_Score": 0.9537
+}
