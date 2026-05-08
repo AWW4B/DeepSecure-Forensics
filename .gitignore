@@ -10,6 +10,12 @@ datasets/la_test/*
 !datasets/la_test/meta.csv
 !datasets/la_test/.gitkeep
 
+datasets/validation_dataset/**
+!datasets/validation_dataset/**/
+!datasets/validation_dataset/**/*.csv
+!datasets/validation_dataset/**/*.gitkeep
+
+
 # Model weights
 **/*.pth
 
