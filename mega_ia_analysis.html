@@ -1,0 +1,1378 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<title>mega_ia_analysis</title>
+<style>body{font-family:Segoe UI,Arial,sans-serif;max-width:1100px;margin:24px auto;line-height:1.5} .cell{border:1px solid #ddd;border-radius:8px;padding:12px;margin:12px 0} pre{white-space:pre-wrap;word-break:break-word;background:#f6f8fa;padding:12px;border-radius:6px;overflow:auto} .markdown{background:#fffbe6} .output{background:#f0f7ff}</style>
+</head><body>
+<h1>mega_ia_analysis</h1>
+<p>Regenerated from notebook source.</p>
+<div class="cell"><strong>1. markdown</strong>
+<div class="markdown"><pre># MeGA-IA Experiments Notebook
+### Systematic Improvement Study: Fitness Function · Search Budget · Penalty Ablation
+
+This notebook runs **10 MeGA-IA variants** across three improvement tiers and compares them all on the Deepfake-Eval-2024 test set.
+
+| Tier | Experiments | What changes |
+|------|-------------|-------------|
+| **Tier 1** | E01–E04 | Fitness function (accuracy → AUC → balanced), λ tuning |
+| **Tier 2** | E05–E07 | Search budget: more gens/pop, diversity injection, 3-segment alpha genome |
+| **Tier 3** | E08–E10 | Penalty ablation: CKA-only, Entropy-only, Multi-layer CKA |
+
+**Checkpointing**: Every generation is checkpointed. You can interrupt and resume freely.  
+**Logging**: Every candidate evaluation prints live metrics during fitness computation.
+</pre></div>
+</div>
+<div class="cell"><strong>2. code</strong>
+<pre>from google.colab import drive
+drive.mount(&#x27;/content/drive&#x27;)
+
+import subprocess, sys
+subprocess.check_call([
+    sys.executable, &#x27;-m&#x27;, &#x27;pip&#x27;, &#x27;install&#x27;, &#x27;-q&#x27;,
+    &#x27;tqdm&#x27;, &#x27;soundfile&#x27;, &#x27;scikit-learn&#x27;, &#x27;scipy&#x27;, &#x27;librosa&#x27;, &#x27;matplotlib&#x27;, &#x27;seaborn&#x27;
+])
+print(&#x27;✅ Dependencies ready.&#x27;)
+</pre>
+</div>
+<div class="cell"><strong>3. code</strong>
+<pre>import os, sys, time, copy, json, random, datetime, warnings, math
+import numpy as np
+import pandas as pd
+import soundfile as sf
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset
+import librosa
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import matplotlib.ticker as mticker
+import seaborn as sns
+from tqdm.notebook import tqdm
+from sklearn.metrics import (
+    roc_auc_score, accuracy_score, balanced_accuracy_score,
+    precision_score, recall_score, f1_score,
+    confusion_matrix, roc_curve, auc as sk_auc
+)
+
+torch.manual_seed(0)
+np.random.seed(0)
+print(&#x27;✅ All imports successful.&#x27;)
+</pre>
+</div>
+<div class="cell"><strong>4. code</strong>
+<pre># ── Logging ───────────────────────────────────────────────────────────────────
+ICONS = {&#x27;INFO&#x27;: &#x27;  &#x27;, &#x27;OK&#x27;: &#x27;✅&#x27;, &#x27;WARN&#x27;: &#x27;⚠️ &#x27;, &#x27;ERR&#x27;: &#x27;❌&#x27;, &#x27;HEAD&#x27;: &#x27;🔷&#x27;, &#x27;STAR&#x27;: &#x27;⭐&#x27;}
+
+def log(msg, level=&#x27;INFO&#x27;):
+    ts = datetime.datetime.now().strftime(&#x27;%H:%M:%S&#x27;)
+    icon = ICONS.get(level, &#x27;  &#x27;)
+    print(f&#x27;[{ts}] {icon} {msg}&#x27;)
+
+# ── Checkpoint helpers ─────────────────────────────────────────────────────────
+def save_exp_results(ckpt_dir, exp_id, best_val_metrics, history, best_genome):
+    data = {
+        &#x27;completed&#x27;: True,
+        &#x27;timestamp&#x27;: datetime.datetime.now().isoformat(),
+        &#x27;best_val_metrics&#x27;: best_val_metrics,
+        &#x27;history&#x27;: history,
+        &#x27;best_genome&#x27;: best_genome.tolist() if isinstance(best_genome, np.ndarray) else best_genome,
+    }
+    with open(os.path.join(ckpt_dir, f&#x27;{exp_id}_results.json&#x27;), &#x27;w&#x27;) as f:
+        json.dump(data, f, indent=2)
+
+def load_exp_results(ckpt_dir, exp_id):
+    rpath = os.path.join(ckpt_dir, f&#x27;{exp_id}_results.json&#x27;)
+    wpath = os.path.join(ckpt_dir, f&#x27;{exp_id}_best_weights.pth&#x27;)
+    if os.path.exists(rpath) and os.path.exists(wpath):
+        with open(rpath) as f:
+            d = json.load(f)
+        if d.get(&#x27;completed&#x27;):
+            return d
+    return None
+
+def save_test_results(ckpt_dir, exp_id, test_metrics):
+    data = {&#x27;completed&#x27;: True, &#x27;timestamp&#x27;: datetime.datetime.now().isoformat(),
+            &#x27;test_metrics&#x27;: test_metrics}
+    with open(os.path.join(ckpt_dir, f&#x27;{exp_id}_test_results.json&#x27;), &#x27;w&#x27;) as f:
+        json.dump(data, f, indent=2)
+
+def load_test_results(ckpt_dir, exp_id):
+    path = os.path.join(ckpt_dir, f&#x27;{exp_id}_test_results.json&#x27;)
+    if os.path.exists(path):
+        with open(path) as f:
+            d = json.load(f)
+        if d.get(&#x27;completed&#x27;):
+            return d[&#x27;test_metrics&#x27;]
+    return None
+
+log(&#x27;Logger + checkpoint utilities ready.&#x27;, &#x27;OK&#x27;)
+</pre>
+</div>
+<div class="cell"><strong>5. code</strong>
+<pre># ══ CHANGE THESE IF YOUR PATHS DIFFER ═══════════════════════════════════════
+WORKING_DIR    = &quot;/content/drive/My Drive/ANN/ANN&quot;
+CKPT1          = &quot;rawnet2-antispoofing/models/model_logical_weighted_CCE_25_32_0.0001_full_seed/checkpoint_ep025.pth&quot;
+CKPT2          = &quot;rawnet2-antispoofing/models/model_logical_weighted_CCE_25_32_0.0001_seed9999_checkpoints/checkpoint_ep025.pth&quot;
+XMAD_PATH      = &quot;Datasets/XMAD-Bench: Cross-Domain Multilingual Audio Deepfake Benchmark&quot;
+DEEPFAKE_PATH  = &quot;Datasets/Deepfake-Evals-2024/audio&quot;
+BATCH_SIZE     = 16
+# ════════════════════════════════════════════════════════════════════════════
+
+CHECKPOINT_DIR = os.path.join(WORKING_DIR, &quot;mega_ia_experiments&quot;)
+
+if not os.path.isdir(WORKING_DIR):
+    raise FileNotFoundError(f&quot;❌ WORKING_DIR not found: {WORKING_DIR}&quot;)
+
+os.chdir(WORKING_DIR)
+os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+
+for label, path in [(&#x27;Checkpoint 1&#x27;, CKPT1), (&#x27;Checkpoint 2&#x27;, CKPT2)]:
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f&#x27;❌ {label} not found: {os.path.abspath(path)}&#x27;)
+    log(f&#x27;{label}: {os.path.getsize(path)/1e6:.1f} MB  ✓&#x27;)
+
+for label, path in [(&#x27;XMAD dir&#x27;, XMAD_PATH), (&#x27;Deepfake dir&#x27;, DEEPFAKE_PATH)]:
+    if not os.path.isdir(path):
+        raise FileNotFoundError(f&#x27;❌ {label} not found&#x27;)
+    log(f&#x27;{label} found ✓&#x27;)
+
+log(f&#x27;Experiment outputs → {CHECKPOINT_DIR}&#x27;, &#x27;OK&#x27;)
+</pre>
+</div>
+<div class="cell"><strong>6. code</strong>
+<pre>device = &#x27;cuda&#x27; if torch.cuda.is_available() else &#x27;cpu&#x27;
+log(f&#x27;Device: {device.upper()}&#x27;)
+if device == &#x27;cuda&#x27;:
+    props = torch.cuda.get_device_properties(0)
+    free  = (props.total_memory - torch.cuda.memory_allocated()) / 1e9
+    log(f&#x27;GPU: {props.name} | Total: {props.total_memory/1e9:.1f} GB | Free: {free:.1f} GB&#x27;)
+else:
+    log(&#x27;No GPU — CPU mode (very slow for large experiments)&#x27;, &#x27;WARN&#x27;)
+</pre>
+</div>
+<div class="cell"><strong>7. markdown</strong>
+<div class="markdown"><pre>## RawNet2 Architecture</pre></div>
+</div>
+<div class="cell"><strong>8. code</strong>
+<pre>class SincConv(nn.Module):
+    def __init__(self, device, out_channels, kernel_size, sample_rate=16000):
+        super().__init__()
+        self.out_channels = out_channels + 1
+        self.kernel_size   = kernel_size if kernel_size % 2 != 0 else kernel_size + 1
+        self.device        = device
+        self.sample_rate   = sample_rate
+        f          = int(self.sample_rate / 2) * np.linspace(0, 1, 257)
+        fmel       = 2595 * np.log10(1 + f / 700)
+        filbw      = 700 * (10 ** (np.linspace(np.min(fmel), np.max(fmel), self.out_channels + 2) / 2595) - 1)
+        self.freq  = filbw[:self.out_channels]
+        self.hsupp = torch.arange(-(self.kernel_size-1)/2, (self.kernel_size-1)/2 + 1)
+        self.band_pass = torch.zeros(self.out_channels - 1, self.kernel_size)
+
+    def forward(self, x):
+        for i in range(len(self.freq) - 1):
+            fmin, fmax = self.freq[i], self.freq[i+1]
+            hH = (2*fmax/self.sample_rate) * np.sinc(2*fmax*self.hsupp/self.sample_rate)
+            hL = (2*fmin/self.sample_rate) * np.sinc(2*fmin*self.hsupp/self.sample_rate)
+            self.band_pass[i, :] = torch.Tensor(np.hamming(self.kernel_size)) * torch.Tensor(hH - hL)
+        filt = self.band_pass.to(self.device).view(self.out_channels-1, 1, self.kernel_size)
+        return F.conv1d(x, filt, stride=1, padding=0)
+
+
+class Residual_block(nn.Module):
+    def __init__(self, nb_filts, first=False):
+        super().__init__()
+        self.first = first
+        if not self.first:
+            self.bn1 = nn.BatchNorm1d(num_features=nb_filts[0])
+        self.lrelu = nn.LeakyReLU(negative_slope=0.3)
+        self.conv1 = nn.Conv1d(nb_filts[0], nb_filts[1], kernel_size=3, padding=1)
+        self.bn2   = nn.BatchNorm1d(num_features=nb_filts[1])
+        self.conv2 = nn.Conv1d(nb_filts[1], nb_filts[1], kernel_size=3, padding=1)
+        self.downsample = nb_filts[0] != nb_filts[1]
+        if self.downsample:
+            self.conv_downsample = nn.Conv1d(nb_filts[0], nb_filts[1], kernel_size=1)
+        self.mp = nn.MaxPool1d(3)
+
+    def forward(self, x):
+        identity = x
+        out = x if self.first else self.lrelu(self.bn1(x))
+        out = self.conv2(self.lrelu(self.bn2(self.conv1(out))))
+        if self.downsample:
+            identity = self.conv_downsample(identity)
+        out += identity
+        return self.mp(out)
+
+
+class RawNet(nn.Module):
+    def __init__(self, d_args, device):
+        super().__init__()
+        self.device    = device
+        self.Sinc_conv = SincConv(device=device, out_channels=d_args[&#x27;filts&#x27;][0], kernel_size=d_args[&#x27;first_conv&#x27;])
+        self.first_bn  = nn.BatchNorm1d(num_features=d_args[&#x27;filts&#x27;][0])
+        self.selu      = nn.SELU(inplace=True)
+        self.block0    = nn.Sequential(Residual_block(nb_filts=d_args[&#x27;filts&#x27;][1], first=True))
+        self.block1    = nn.Sequential(Residual_block(nb_filts=d_args[&#x27;filts&#x27;][1]))
+        self.block2    = nn.Sequential(Residual_block(nb_filts=d_args[&#x27;filts&#x27;][2]))
+        f2 = [d_args[&#x27;filts&#x27;][2][1], d_args[&#x27;filts&#x27;][2][1]]
+        self.block3, self.block4, self.block5 = [nn.Sequential(Residual_block(nb_filts=f2)) for _ in range(3)]
+        self.avgpool   = nn.AdaptiveAvgPool1d(1)
+        self.fc_att    = nn.ModuleList(
+            [nn.Linear(f, f) for f in [d_args[&#x27;filts&#x27;][1][-1]]*2 + [d_args[&#x27;filts&#x27;][2][-1]]*4])
+        self.bn_before_gru = nn.BatchNorm1d(num_features=d_args[&#x27;filts&#x27;][2][-1])
+        self.gru = nn.GRU(input_size=d_args[&#x27;filts&#x27;][2][-1], hidden_size=d_args[&#x27;gru_node&#x27;],
+                          num_layers=d_args[&#x27;nb_gru_layer&#x27;], batch_first=True)
+        self.fc1 = nn.Linear(d_args[&#x27;gru_node&#x27;], d_args[&#x27;nb_fc_node&#x27;])
+        self.fc2 = nn.Linear(d_args[&#x27;nb_fc_node&#x27;], d_args[&#x27;nb_classes&#x27;])
+
+    def forward(self, x, is_test=False):
+        x = x.view(x.size(0), 1, -1)
+        x = self.selu(self.first_bn(F.max_pool1d(torch.abs(self.Sinc_conv(x)), 3)))
+        for i, block in enumerate([self.block0, self.block1, self.block2,
+                                    self.block3, self.block4, self.block5]):
+            x   = block(x)
+            att = torch.sigmoid(self.fc_att[i](self.avgpool(x).view(x.size(0), -1)))
+            att = att.view(x.size(0), x.size(1), -1)
+            x   = x * att + att
+        x = self.selu(self.bn_before_gru(x)).permute(0, 2, 1)
+        self.gru.flatten_parameters()
+        x, _ = self.gru(x)
+        logits = self.fc2(self.fc1(x[:, -1, :]))
+        return F.softmax(logits, dim=1) if is_test else logits
+
+
+d_args = {
+    &#x27;first_conv&#x27;  : 128,
+    &#x27;filts&#x27;       : [128, [128, 128], [128, 512], [512, 512]],
+    &#x27;nb_fc_node&#x27;  : 1024,
+    &#x27;gru_node&#x27;    : 1024,
+    &#x27;nb_gru_layer&#x27;: 3,
+    &#x27;nb_classes&#x27;  : 2,
+}
+log(&#x27;RawNet2 architecture defined.&#x27;, &#x27;OK&#x27;)
+</pre>
+</div>
+<div class="cell"><strong>9. markdown</strong>
+<div class="markdown"><pre>## Dataset Classes</pre></div>
+</div>
+<div class="cell"><strong>10. code</strong>
+<pre>def pad_random(x, max_len=64600):
+    x_len = x.shape[0]
+    if x_len &gt; max_len:
+        stt = np.random.randint(x_len - max_len)
+        return x[stt:stt + max_len]
+    return np.tile(x, (int(max_len / x_len) + 1))[:max_len]
+
+
+class XMADDataset(Dataset):
+    &quot;&quot;&quot;XMAD-Bench validation split — WAV only, soundfile.&quot;&quot;&quot;
+    def __init__(self, root_dir):
+        self.root_dir = root_dir
+        df = pd.read_csv(os.path.join(root_dir, &#x27;meta_validation.csv&#x27;))
+        self.df = df[df[&#x27;split&#x27;] == &#x27;val&#x27;].reset_index(drop=True)
+        self.n_fake = int(self.df[&#x27;is_fake&#x27;].sum())
+        self.n_real = len(self.df) - self.n_fake
+
+    def __len__(self): return len(self.df)
+
+    def __getitem__(self, idx):
+        row    = self.df.iloc[idx]
+        subdir = &#x27;fake&#x27; if row[&#x27;is_fake&#x27;] == 1 else &#x27;real&#x27;
+        path   = os.path.join(self.root_dir, subdir, row[&#x27;sample_name&#x27;])
+        x, _   = sf.read(path)
+        if x.ndim &gt; 1: x = x.mean(axis=1)
+        label  = 0 if row[&#x27;is_fake&#x27;] == 1 else 1  # 0=spoof, 1=bonafide
+        return torch.FloatTensor(pad_random(x)), label
+
+
+class DeepfakeEvalsDataset(Dataset):
+    &quot;&quot;&quot;Deepfake-Evals-2024 test set — mixed formats via librosa.
+    
+    Valid file indices are cached to CHECKPOINT_DIR/deepfake_valid_indices.json
+    so the slow pre-flight only runs once across all sessions/accounts.
+    &quot;&quot;&quot;
+    TARGET_SR = 16000
+
+    def __init__(self, root_dir, cache_dir=None):
+        self.root_dir = root_dir
+        df = pd.read_csv(os.path.join(root_dir, &#x27;audio-metadata-publish.csv&#x27;))
+        df = df[df[&#x27;Filename&#x27;].notna()].copy()
+        df[&#x27;Filename&#x27;] = df[&#x27;Filename&#x27;].astype(str).str.strip()
+
+        cache_path = os.path.join(cache_dir, &#x27;deepfake_valid_indices.json&#x27;) if cache_dir else None
+
+        # ── Try loading cached valid indices first ─────────────────────────
+        if cache_path and os.path.exists(cache_path):
+            with open(cache_path) as f:
+                cached = json.load(f)
+            good = cached[&#x27;good_indices&#x27;]
+            skip_count = cached.get(&#x27;skip_count&#x27;, 0)
+            log(f&#x27;  ✅ Loaded cached file list ({len(good)} valid, {skip_count} skipped) — pre-flight skipped.&#x27;)
+        else:
+            # ── Run pre-flight and cache result ───────────────────────────
+            log(&#x27;  Pre-flighting Deepfake-Evals files (runs once, then cached)...&#x27;)
+            log(&#x27;  ⚠️  This may take a few minutes on first run. Subsequent runs skip this entirely.&#x27;, &#x27;WARN&#x27;)
+            good, skip = [], []
+            total = len(df)
+            for pos, (i, row) in enumerate(df.iterrows()):
+                if pos % 100 == 0:
+                    log(f&#x27;  Pre-flight progress: {pos}/{total} files checked...&#x27;)
+                path = os.path.join(root_dir, row[&#x27;Filename&#x27;])
+                if not os.path.isfile(path):
+                    skip.append(row[&#x27;Filename&#x27;]); continue
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter(&#x27;ignore&#x27;)
+                        librosa.load(path, sr=None, mono=True, duration=0.1)
+                    good.append(i)
+                except Exception:
+                    skip.append(row[&#x27;Filename&#x27;])
+
+            skip_count = len(skip)
+            if skip_count:
+                log(f&#x27;  Skipped {skip_count} unreadable files.&#x27;, &#x27;WARN&#x27;)
+
+            # Save cache so next session skips this entirely
+            if cache_path:
+                with open(cache_path, &#x27;w&#x27;) as f:
+                    json.dump({&#x27;good_indices&#x27;: good, &#x27;skip_count&#x27;: skip_count}, f)
+                log(f&#x27;  📁 Valid file list cached → {cache_path}&#x27;)
+
+        self.df     = df.loc[good].reset_index(drop=True)
+        self.n_real = int((self.df[&#x27;Ground Truth&#x27;] == &#x27;Real&#x27;).sum())
+        self.n_fake = len(self.df) - self.n_real
+
+    def __len__(self): return len(self.df)
+
+    def __getitem__(self, idx):
+        row  = self.df.iloc[idx]
+        path = os.path.join(self.root_dir, str(row[&#x27;Filename&#x27;]))
+        x, _ = librosa.load(path, sr=self.TARGET_SR, mono=True)
+        label = 1 if row[&#x27;Ground Truth&#x27;] == &#x27;Real&#x27; else 0
+        return torch.FloatTensor(pad_random(x)), label
+
+
+log(&#x27;Dataset classes defined.&#x27;, &#x27;OK&#x27;)
+</pre>
+</div>
+<div class="cell"><strong>11. markdown</strong>
+<div class="markdown"><pre>## Load Datasets (Full — No Subsampling)</pre></div>
+</div>
+<div class="cell"><strong>12. code</strong>
+<pre>log(&#x27;Loading XMAD-Bench validation set (full)...&#x27;, &#x27;HEAD&#x27;)
+xmad_ds = XMADDataset(XMAD_PATH)
+log(f&#x27;XMAD: {len(xmad_ds):,} samples  ({xmad_ds.n_real:,} real / {xmad_ds.n_fake:,} fake)&#x27;)
+
+log(&#x27;Loading Deepfake-Eval-2024 test set (full)...&#x27;, &#x27;HEAD&#x27;)
+deepfake_ds = DeepfakeEvalsDataset(DEEPFAKE_PATH, cache_dir=CHECKPOINT_DIR)
+log(f&#x27;Deepfake-Eval: {len(deepfake_ds):,} samples  ({deepfake_ds.n_real:,} real / {deepfake_ds.n_fake:,} fake)&#x27;)
+
+val_loader  = DataLoader(xmad_ds,     batch_size=BATCH_SIZE, shuffle=False,
+                         num_workers=2, pin_memory=(device==&#x27;cuda&#x27;))
+test_loader = DataLoader(deepfake_ds, batch_size=BATCH_SIZE, shuffle=False,
+                         num_workers=2, pin_memory=(device==&#x27;cuda&#x27;))
+
+log(f&#x27;Val loader : {len(val_loader):,} batches&#x27;, &#x27;OK&#x27;)
+log(f&#x27;Test loader: {len(test_loader):,} batches&#x27;, &#x27;OK&#x27;)
+
+# Smoke-test
+log(&#x27;Smoke-testing loaders...&#x27;)
+xb, yb = next(iter(val_loader))
+log(f&#x27;Val  batch: {tuple(xb.shape)} labels sample={yb[:4].tolist()}&#x27;)
+xb, yb = next(iter(test_loader))
+log(f&#x27;Test batch: {tuple(xb.shape)} labels sample={yb[:4].tolist()}&#x27;)
+del xb, yb
+log(&#x27;Both loaders confirmed.&#x27;, &#x27;OK&#x27;)
+</pre>
+</div>
+<div class="cell"><strong>13. markdown</strong>
+<div class="markdown"><pre>## Load Parent Checkpoints</pre></div>
+</div>
+<div class="cell"><strong>14. code</strong>
+<pre>def fix_state_dict(sd):
+    &quot;&quot;&quot;Translate checkpoint keys from model.py naming to notebook RawNet naming.&quot;&quot;&quot;
+    new = {}
+    for k, v in sd.items():
+        if &#x27;fc_attention&#x27; in k:
+            k = k.replace(&#x27;fc_attention&#x27;, &#x27;fc_att.&#x27;)
+            k = k.replace(&#x27;.0.&#x27;, &#x27;.&#x27;)
+        elif &#x27;fc1_gru&#x27; in k:
+            k = k.replace(&#x27;fc1_gru&#x27;, &#x27;fc1&#x27;)
+        elif &#x27;fc2_gru&#x27; in k:
+            k = k.replace(&#x27;fc2_gru&#x27;, &#x27;fc2&#x27;)
+        new[k] = v
+    return new
+
+log(&#x27;Loading parent checkpoints...&#x27;)
+ckpt1 = torch.load(CKPT1, map_location=device)
+p1_state = fix_state_dict(ckpt1[&#x27;model_state_dict&#x27;])
+log(f&#x27;Parent 1 loaded: {len(p1_state)} keys&#x27;)
+
+ckpt2 = torch.load(CKPT2, map_location=device)
+p2_state = fix_state_dict(ckpt2[&#x27;model_state_dict&#x27;])
+log(f&#x27;Parent 2 loaded: {len(p2_state)} keys&#x27;)
+
+assert set(p1_state.keys()) == set(p2_state.keys()), &#x27;❌ Architecture key mismatch!&#x27;
+
+# Validate keys against live model
+_probe = RawNet(d_args, device).to(device)
+missing = set(_probe.state_dict().keys()) - set(p1_state.keys())
+extra   = set(p1_state.keys()) - set(_probe.state_dict().keys())
+del _probe
+if missing or extra:
+    raise RuntimeError(f&#x27;Key mismatch! Missing: {missing}  Extra: {extra}&#x27;)
+
+log(&#x27;Both parents loaded and keys verified.&#x27;, &#x27;OK&#x27;)
+</pre>
+</div>
+<div class="cell"><strong>15. markdown</strong>
+<div class="markdown"><pre>## Core Utilities: Feature Extraction, CKA, Metrics</pre></div>
+</div>
+<div class="cell"><strong>16. code</strong>
+<pre>def compute_linear_cka(x: torch.Tensor, y: torch.Tensor) -&gt; float:
+    &quot;&quot;&quot;Linear Centred Kernel Alignment. Both tensors: (N, D) on CPU.&quot;&quot;&quot;
+    x = x - x.mean(0)
+    y = y - y.mean(0)
+    num   = torch.norm(torch.matmul(x.t(), y)) ** 2
+    denom = (torch.norm(torch.matmul(x.t(), x)) *
+             torch.norm(torch.matmul(y.t(), y)) + 1e-8)
+    return (num / denom).item()
+
+
+def extract_reference_features(model, loader, device):
+    &quot;&quot;&quot;
+    Extract features from 3 network depths for use as parent-1 reference.
+    Returns dict: &#x27;early&#x27; (after block1), &#x27;mid&#x27; (after block3), &#x27;final&#x27; (GRU last step).
+    All tensors shape (N, D), CPU.
+    &quot;&quot;&quot;
+    model.eval()
+    fe, fm, ff = [], [], []
+
+    def h_early(m, inp, out):
+        fe.append(F.adaptive_avg_pool1d(out.detach().cpu(), 1).squeeze(-1))
+    def h_mid(m, inp, out):
+        fm.append(F.adaptive_avg_pool1d(out.detach().cpu(), 1).squeeze(-1))
+    def h_gru(m, inp, out):
+        seq, _ = out
+        ff.append(seq[:, -1, :].detach().cpu())
+
+    hooks = [
+        model.block1.register_forward_hook(h_early),
+        model.block3.register_forward_hook(h_mid),
+        model.gru.register_forward_hook(h_gru),
+    ]
+    with torch.no_grad():
+        for x, _ in tqdm(loader, desc=&#x27;  Extracting P1 features&#x27;, leave=False):
+            model(x.to(device), is_test=True)
+    for h in hooks: h.remove()
+
+    return {
+        &#x27;early&#x27;: torch.cat(fe),   # (N, 128)
+        &#x27;mid&#x27;:   torch.cat(fm),   # (N, 512)
+        &#x27;final&#x27;: torch.cat(ff),   # (N, 1024)
+    }
+
+
+def full_metrics(labels, preds, scores):
+    &quot;&quot;&quot;Compute all evaluation metrics given labels, hard preds, and soft scores.&quot;&quot;&quot;
+    cm = confusion_matrix(labels, preds)
+    tn, fp, fn, tp = cm.ravel() if cm.shape == (2,2) else (0,0,0,0)
+    return {
+        &#x27;accuracy&#x27;    : float(accuracy_score(labels, preds)),
+        &#x27;auc&#x27;         : float(roc_auc_score(labels, scores)),
+        &#x27;bal_acc&#x27;     : float(balanced_accuracy_score(labels, preds)),
+        &#x27;precision&#x27;   : float(precision_score(labels, preds, zero_division=0)),
+        &#x27;recall&#x27;      : float(recall_score(labels, preds, zero_division=0)),
+        &#x27;f1&#x27;          : float(f1_score(labels, preds, zero_division=0)),
+        &#x27;tn&#x27;: int(tn), &#x27;fp&#x27;: int(fp), &#x27;fn&#x27;: int(fn), &#x27;tp&#x27;: int(tp),
+        &#x27;confusion_matrix&#x27;: cm.tolist(),
+    }
+
+
+log(&#x27;Core utilities defined.&#x27;, &#x27;OK&#x27;)
+</pre>
+</div>
+<div class="cell"><strong>17. code</strong>
+<pre>def evaluate_candidate(model, loader, device, p1_feats, config):
+    &quot;&quot;&quot;
+    Evaluate one candidate model on the FULL validation set.
+    Logs live metrics for every call.
+    Returns (metrics_dict, fitness_score).
+    &quot;&quot;&quot;
+    model.eval()
+    all_scores, all_labels = [], []
+    cf_e, cf_m, cf_f = [], [], []   # child features: early, mid, final
+
+    def h_e(m, inp, out): cf_e.append(F.adaptive_avg_pool1d(out.detach().cpu(), 1).squeeze(-1))
+    def h_m(m, inp, out): cf_m.append(F.adaptive_avg_pool1d(out.detach().cpu(), 1).squeeze(-1))
+    def h_g(m, inp, out):
+        seq, _ = out
+        cf_f.append(seq[:, -1, :].detach().cpu())
+
+    hooks = [
+        model.block1.register_forward_hook(h_e),
+        model.block3.register_forward_hook(h_m),
+        model.gru.register_forward_hook(h_g),
+    ]
+    with torch.no_grad():
+        for x, y in loader:
+            out = model(x.to(device), is_test=True)
+            all_scores.append(out[:, 1].cpu().numpy())
+            all_labels.append(y.numpy())
+    for h in hooks: h.remove()
+
+    scores = np.concatenate(all_scores)
+    labels = np.concatenate(all_labels)
+    preds  = (scores &gt; 0.5).astype(int)
+
+    feat_f = torch.cat(cf_f)   # (N, 1024)
+    feat_e = torch.cat(cf_e)   # (N, 128)
+    feat_m = torch.cat(cf_m)   # (N, 512)
+
+    # ── Metrics ──────────────────────────────────────────────────────────
+    met = full_metrics(labels, preds, scores)
+    met[&#x27;scores&#x27;] = scores.tolist()
+    met[&#x27;labels&#x27;] = labels.tolist()
+
+    # ── Entropy penalty ───────────────────────────────────────────────────
+    # Normalize by log2(2)=1 since binary, so range stays [0,1]
+    p_mat = np.stack([1 - scores, scores], axis=1).clip(1e-8, 1 - 1e-8)
+    met[&#x27;entropy&#x27;] = float(-np.mean(np.sum(p_mat * np.log2(p_mat), axis=1)))
+
+    # ── CKA penalty ───────────────────────────────────────────────────────
+    cka_mode = config.get(&#x27;cka_mode&#x27;, &#x27;final&#x27;)
+    if cka_mode == &#x27;multilayer&#x27;:
+        cka_e = compute_linear_cka(feat_e, p1_feats[&#x27;early&#x27;])
+        cka_m = compute_linear_cka(feat_m, p1_feats[&#x27;mid&#x27;])
+        cka_f = compute_linear_cka(feat_f, p1_feats[&#x27;final&#x27;])
+        # Weighted: later layers matter more for task-specific features
+        cka_score = 0.20 * cka_e + 0.30 * cka_m + 0.50 * cka_f
+        met[&#x27;cka_early&#x27;] = float(cka_e)
+        met[&#x27;cka_mid&#x27;]   = float(cka_m)
+        met[&#x27;cka_final&#x27;] = float(cka_f)
+    else:
+        cka_score = compute_linear_cka(feat_f, p1_feats[&#x27;final&#x27;])
+    met[&#x27;cka&#x27;] = float(cka_score)
+    met[&#x27;interference&#x27;] = float(1.0 - cka_score)
+
+    # ── Composite fitness ─────────────────────────────────────────────────
+    ft_type = config.get(&#x27;fitness_type&#x27;, &#x27;accuracy&#x27;)
+    base = {&#x27;accuracy&#x27;: met[&#x27;accuracy&#x27;], &#x27;auc&#x27;: met[&#x27;auc&#x27;], &#x27;balanced&#x27;: met[&#x27;bal_acc&#x27;]}[ft_type]
+    fitness = base - config[&#x27;lambda1&#x27;] * met[&#x27;interference&#x27;] - config[&#x27;lambda2&#x27;] * met[&#x27;entropy&#x27;]
+    met[&#x27;fitness&#x27;] = float(fitness)
+
+    return met, float(fitness)
+
+
+log(&#x27;evaluate_candidate() defined.&#x27;, &#x27;OK&#x27;)
+</pre>
+</div>
+<div class="cell"><strong>18. markdown</strong>
+<div class="markdown"><pre>## MeGA-IA Evolutionary Engine</pre></div>
+</div>
+<div class="cell"><strong>19. code</strong>
+<pre>def run_mega_ia(config, p1_state, p2_state, d_args, device,
+                val_loader, p1_feats, checkpoint_dir):
+    &quot;&quot;&quot;
+    Run one MeGA-IA experiment to completion with full checkpointing.
+
+    alpha_mode:
+      &#x27;global&#x27;   — single alpha scalar (original)
+      &#x27;segment3&#x27; — 3 independent alphas (early / mid / late layers)
+
+    Returns (best_val_metrics, history, best_genome).
+    &quot;&quot;&quot;
+    exp_id      = config[&#x27;id&#x27;]
+    evo_ckpt    = os.path.join(checkpoint_dir, f&#x27;{exp_id}_evo_state.json&#x27;)
+    weights_pth = os.path.join(checkpoint_dir, f&#x27;{exp_id}_best_weights.pth&#x27;)
+
+    # ── Genome setup ──────────────────────────────────────────────────────
+    float_keys = [k for k in p1_state.keys()
+                  if p1_state[k].dtype.is_floating_point]
+    n_fl = len(float_keys)
+    all_keys = list(p1_state.keys())
+
+    alpha_mode  = config.get(&#x27;alpha_mode&#x27;, &#x27;global&#x27;)
+    genome_size = 1 if alpha_mode == &#x27;global&#x27; else 3
+
+    def make_model(genome):
+        m = RawNet(d_args, device).to(device)
+        sd, fi = {}, 0
+        for k in all_keys:
+            v1 = p1_state[k].to(device)
+            v2 = p2_state[k].to(device)
+            if not v1.dtype.is_floating_point:
+                sd[k] = v1.clone()
+            else:
+                if alpha_mode == &#x27;global&#x27;:
+                    a = float(genome[0])
+                else:  # segment3
+                    seg = min(fi * 3 // n_fl, 2)
+                    a = float(genome[seg])
+                sd[k] = a * v1 + (1.0 - a) * v2
+                fi += 1
+        m.load_state_dict(sd)
+        return m
+
+    def rnd_genome():
+        return np.random.uniform(0.0, 1.0, genome_size)
+
+    def crossover(g1, g2):
+        mask = np.random.rand(genome_size) &lt; 0.5
+        return np.where(mask, g1, g2)
+
+    def mutate(genome, gen):
+        decay = math.exp(-0.5 * gen / max(config[&#x27;generations&#x27;], 1))
+        sigma = config.get(&#x27;sigma_base&#x27;, 0.10) * decay
+        return np.clip(genome + np.random.normal(0, sigma, genome_size), 0.0, 1.0)
+
+    def tournament(pop, fits, k=4):
+        idx = np.random.choice(len(pop), min(k, len(pop)), replace=False)
+        best_i = idx[np.argmax([fits[i] for i in idx])]
+        return pop[best_i].copy()
+
+    # ── Initialize / resume ───────────────────────────────────────────────
+    start_gen       = 0
+    population      = [rnd_genome() for _ in range(config[&#x27;pop_size&#x27;])]
+    best_genome     = population[0].copy()
+    best_fitness    = -np.inf
+    best_val_met    = None
+    stagnation      = 0
+    hist_keys = [&#x27;best_fit&#x27;,&#x27;mean_fit&#x27;,&#x27;worst_fit&#x27;,&#x27;best_auc&#x27;,&#x27;best_bal&#x27;,
+                 &#x27;best_f1&#x27;,&#x27;mean_auc&#x27;,&#x27;diversity&#x27;,&#x27;best_prec&#x27;,&#x27;best_rec&#x27;]
+    history = {k: [] for k in hist_keys}
+
+    if os.path.exists(evo_ckpt):
+        try:
+            with open(evo_ckpt) as f: ec = json.load(f)
+            start_gen    = ec[&#x27;last_gen&#x27;] + 1
+            population   = [np.array(g) for g in ec[&#x27;population&#x27;]]
+            best_genome  = np.array(ec[&#x27;best_genome&#x27;])
+            best_fitness = ec[&#x27;best_fitness&#x27;]
+            best_val_met = ec.get(&#x27;best_val_met&#x27;)
+            stagnation   = ec.get(&#x27;stagnation&#x27;, 0)
+            history      = ec[&#x27;history&#x27;]
+            log(f&#x27;  ♻️  Resumed from gen {start_gen}&#x27;, &#x27;WARN&#x27;)
+        except Exception as e:
+            log(f&#x27;  Evo checkpoint corrupt ({e}) — starting fresh&#x27;, &#x27;WARN&#x27;)
+
+    total_gens = config[&#x27;generations&#x27;]
+    pop_sz     = config[&#x27;pop_size&#x27;]
+
+    # ── Evolutionary loop ─────────────────────────────────────────────────
+    for gen in range(start_gen, total_gens):
+        t0 = time.time()
+        sep = &#x27;─&#x27; * 50
+        log(f&#x27;&#x27;)
+        log(f&#x27;┌─ [{config[&quot;name&quot;]}]  Gen {gen+1:2d}/{total_gens}  {sep[:30]}&#x27;)
+
+        gen_fits = []
+        gen_mets = []
+
+        for ci, genome in enumerate(population):
+            model = make_model(genome)
+            met, fit = evaluate_candidate(model, val_loader, device, p1_feats, config)
+            gen_fits.append(fit)
+            gen_mets.append(met)
+            del model
+            if device == &#x27;cuda&#x27;: torch.cuda.empty_cache()
+
+            # ── Live candidate log ────────────────────────────────────────
+            log(f&#x27;│ [{ci+1:2d}/{pop_sz}] &#x27;
+                f&#x27;fit={fit:+.4f}  AUC={met[&quot;auc&quot;]:.4f}  &#x27;
+                f&#x27;bal={met[&quot;bal_acc&quot;]:.4f}  F1={met[&quot;f1&quot;]:.4f}  &#x27;
+                f&#x27;rec={met[&quot;recall&quot;]:.4f}  prec={met[&quot;precision&quot;]:.4f}  &#x27;
+                f&#x27;CKA={met[&quot;cka&quot;]:.4f}  ent={met[&quot;entropy&quot;]:.4f}&#x27;)
+
+        # ── Generation summary ────────────────────────────────────────────
+        gen_best_i  = int(np.argmax(gen_fits))
+        gen_best_f  = gen_fits[gen_best_i]
+        gen_best_m  = gen_mets[gen_best_i]
+        mean_fit    = float(np.mean(gen_fits))
+        worst_fit   = float(np.min(gen_fits))
+        mean_auc    = float(np.mean([m[&#x27;auc&#x27;] for m in gen_mets]))
+        # Diversity: std of all genome values flattened
+        diversity   = float(np.std(np.vstack(population)))
+
+        improved = gen_best_f &gt; best_fitness
+        if improved:
+            best_fitness = gen_best_f
+            best_genome  = population[gen_best_i].copy()
+            best_val_met = {k: v for k, v in gen_best_m.items()
+                            if k not in (&#x27;scores&#x27;, &#x27;labels&#x27;)}
+            bm = make_model(best_genome)
+            torch.save(bm.state_dict(), weights_pth)
+            del bm
+            if device == &#x27;cuda&#x27;: torch.cuda.empty_cache()
+            stagnation = 0
+        else:
+            stagnation += 1
+
+        history[&#x27;best_fit&#x27;].append(float(gen_best_f))
+        history[&#x27;mean_fit&#x27;].append(mean_fit)
+        history[&#x27;worst_fit&#x27;].append(worst_fit)
+        history[&#x27;best_auc&#x27;].append(float(gen_best_m[&#x27;auc&#x27;]))
+        history[&#x27;best_bal&#x27;].append(float(gen_best_m[&#x27;bal_acc&#x27;]))
+        history[&#x27;best_f1&#x27;].append(float(gen_best_m[&#x27;f1&#x27;]))
+        history[&#x27;mean_auc&#x27;].append(mean_auc)
+        history[&#x27;diversity&#x27;].append(diversity)
+        history[&#x27;best_prec&#x27;].append(float(gen_best_m[&#x27;precision&#x27;]))
+        history[&#x27;best_rec&#x27;].append(float(gen_best_m[&#x27;recall&#x27;]))
+
+        star = &#x27; ⭐ NEW BEST&#x27; if improved else &#x27;&#x27;
+        log(f&#x27;├─ Gen summary  best={gen_best_f:.4f}  mean={mean_fit:.4f}  &#x27;
+            f&#x27;worst={worst_fit:.4f}  div={diversity:.4f}  ({time.time()-t0:.0f}s){star}&#x27;)
+        log(f&#x27;│  Gen best cand:  AUC={gen_best_m[&quot;auc&quot;]:.4f}  &#x27;
+            f&#x27;bal={gen_best_m[&quot;bal_acc&quot;]:.4f}  F1={gen_best_m[&quot;f1&quot;]:.4f}&#x27;)
+        log(f&#x27;│  Global best:    fit={best_fitness:.4f}  stagnation={stagnation} gen(s)&#x27;)
+        if best_genome is not None and len(best_genome) &lt;= 3:
+            log(f&#x27;│  Best genome:    {[f&quot;{v:.3f}&quot; for v in best_genome]}&#x27;)
+
+        # ── Diversity injection ───────────────────────────────────────────
+        if (config.get(&#x27;diversity_injection&#x27;) and
+                stagnation &gt;= config.get(&#x27;diversity_patience&#x27;, 5)):
+            n_inj   = max(1, pop_sz // 4)
+            worst_i = np.argsort(gen_fits)[:n_inj]
+            for wi in worst_i:
+                population[wi] = rnd_genome()
+            log(f&#x27;│  💉 Diversity injection: replaced {n_inj} worst candidates (stagnation reset)&#x27;)
+            stagnation = 0
+
+        # ── Selection + reproduction ──────────────────────────────────────
+        new_pop = [best_genome.copy()]   # elitism
+        while len(new_pop) &lt; pop_sz:
+            pa    = tournament(population, gen_fits)
+            pb    = tournament(population, gen_fits)
+            child = crossover(pa, pb)
+            if np.random.rand() &lt; 0.20:
+                child = mutate(child, gen)
+            new_pop.append(child)
+        population = new_pop
+
+        # ── Save mid-run checkpoint ───────────────────────────────────────
+        ec_out = {
+            &#x27;last_gen&#x27;: gen,
+            &#x27;population&#x27;: [g.tolist() for g in population],
+            &#x27;best_genome&#x27;: best_genome.tolist(),
+            &#x27;best_fitness&#x27;: float(best_fitness),
+            &#x27;best_val_met&#x27;: best_val_met,
+            &#x27;stagnation&#x27;: stagnation,
+            &#x27;history&#x27;: history,
+        }
+        with open(evo_ckpt, &#x27;w&#x27;) as f:
+            json.dump(ec_out, f)
+        log(f&#x27;└─ Gen {gen+1} complete. Checkpoint saved.  [next: gen {gen+2}]&#x27;)
+
+    log(f&#x27;&#x27;)
+    log(f&#x27;🏆 [{config[&quot;name&quot;]}] Evolution finished!&#x27;)
+    log(f&#x27;   Best fitness : {best_fitness:.4f}&#x27;)
+    log(f&#x27;   Best val AUC : {best_val_met[&quot;auc&quot;]:.4f}&#x27;)
+    log(f&#x27;   Best val bal : {best_val_met[&quot;bal_acc&quot;]:.4f}&#x27;)
+    log(f&#x27;   Best val F1  : {best_val_met[&quot;f1&quot;]:.4f}&#x27;)
+
+    return best_val_met, history, best_genome
+
+
+log(&#x27;MeGA-IA engine defined.&#x27;, &#x27;OK&#x27;)
+</pre>
+</div>
+<div class="cell"><strong>20. markdown</strong>
+<div class="markdown"><pre>## Experiment Configurations
+10 experiments across 3 tiers. Each is self-contained and checkpointed.
+
+| ID | Name | Tier | Key change |
+|----|------|------|-----------|
+| E01 | Original MeGA-IA | Tier 1 | Baseline reference |
+| E02 | AUC Fitness | Tier 1 | `acc → AUC` in fitness |
+| E03 | Balanced Acc Fitness | Tier 1 | `acc → balanced_acc` |
+| E04 | AUC + Raised Penalties | Tier 1 | λ₁=0.3, λ₂=0.15 |
+| E05 | Larger Budget | Tier 2 | 20 gens, pop=25 |
+| E06 | Budget + Diversity | Tier 2 | + diversity injection |
+| E07 | 3-Segment Alpha | Tier 2 | early/mid/late independent α |
+| E08 | CKA Only | Tier 3 | λ₂=0 (ablate entropy) |
+| E09 | Entropy Only | Tier 3 | λ₁=0 (ablate CKA) |
+| E10 | Multi-Layer CKA | Tier 3 | CKA at 3 depths |
+</pre></div>
+</div>
+<div class="cell"><strong>21. code</strong>
+<pre>EXPERIMENTS = [
+    # ── Tier 1: Fitness Function ─────────────────────────────────────────
+    dict(id=&#x27;E01_original&#x27;,      name=&#x27;E01 Original MeGA-IA&#x27;,
+         group=&#x27;Tier 1 — Fitness&#x27;,
+         fitness_type=&#x27;accuracy&#x27;, lambda1=0.10, lambda2=0.05,
+         generations=5,  pop_size=10, alpha_mode=&#x27;global&#x27;,   cka_mode=&#x27;final&#x27;,
+         diversity_injection=False, diversity_patience=5, sigma_base=0.10,
+         description=&#x27;Baseline — reproduces Assignment 3 MeGA-IA&#x27;),
+
+    dict(id=&#x27;E02_auc_fitness&#x27;,   name=&#x27;E02 AUC Fitness&#x27;,
+         group=&#x27;Tier 1 — Fitness&#x27;,
+         fitness_type=&#x27;auc&#x27;,      lambda1=0.10, lambda2=0.05,
+         generations=5,  pop_size=10, alpha_mode=&#x27;global&#x27;,   cka_mode=&#x27;final&#x27;,
+         diversity_injection=False, diversity_patience=5, sigma_base=0.10,
+         description=&#x27;Replace accuracy with AUC — immune to predict-all-fake&#x27;),
+
+    dict(id=&#x27;E03_balanced&#x27;,      name=&#x27;E03 Balanced Acc Fitness&#x27;,
+         group=&#x27;Tier 1 — Fitness&#x27;,
+         fitness_type=&#x27;balanced&#x27;, lambda1=0.10, lambda2=0.05,
+         generations=5,  pop_size=10, alpha_mode=&#x27;global&#x27;,   cka_mode=&#x27;final&#x27;,
+         diversity_injection=False, diversity_patience=5, sigma_base=0.10,
+         description=&#x27;(TPR+TNR)/2 — penalises class-imbalance exploitation&#x27;),
+
+    dict(id=&#x27;E04_raised_pen&#x27;,    name=&#x27;E04 AUC + Raised Penalties&#x27;,
+         group=&#x27;Tier 1 — Fitness&#x27;,
+         fitness_type=&#x27;auc&#x27;,      lambda1=0.30, lambda2=0.15,
+         generations=5,  pop_size=10, alpha_mode=&#x27;global&#x27;,   cka_mode=&#x27;final&#x27;,
+         diversity_injection=False, diversity_patience=5, sigma_base=0.10,
+         description=&#x27;AUC fitness + stronger CKA (λ1=0.3) and entropy (λ2=0.15)&#x27;),
+
+    # ── Tier 2: Search Budget ─────────────────────────────────────────────
+    dict(id=&#x27;E05_budget&#x27;,        name=&#x27;E05 Larger Budget&#x27;,
+         group=&#x27;Tier 2 — Search Budget&#x27;,
+         fitness_type=&#x27;auc&#x27;,      lambda1=0.30, lambda2=0.15,
+         generations=20, pop_size=25, alpha_mode=&#x27;global&#x27;,   cka_mode=&#x27;final&#x27;,
+         diversity_injection=False, diversity_patience=5, sigma_base=0.10,
+         description=&#x27;Best T1 config + 20 generations + population 25&#x27;),
+
+    dict(id=&#x27;E06_diversity&#x27;,     name=&#x27;E06 Budget + Diversity&#x27;,
+         group=&#x27;Tier 2 — Search Budget&#x27;,
+         fitness_type=&#x27;auc&#x27;,      lambda1=0.30, lambda2=0.15,
+         generations=20, pop_size=25, alpha_mode=&#x27;global&#x27;,   cka_mode=&#x27;final&#x27;,
+         diversity_injection=True,  diversity_patience=5, sigma_base=0.10,
+         description=&#x27;E05 + inject random candidates when stagnant for 5 gens&#x27;),
+
+    dict(id=&#x27;E07_seg3&#x27;,          name=&#x27;E07 3-Segment Alpha&#x27;,
+         group=&#x27;Tier 2 — Search Budget&#x27;,
+         fitness_type=&#x27;auc&#x27;,      lambda1=0.30, lambda2=0.15,
+         generations=20, pop_size=25, alpha_mode=&#x27;segment3&#x27;, cka_mode=&#x27;final&#x27;,
+         diversity_injection=True,  diversity_patience=5, sigma_base=0.10,
+         description=&#x27;Per-segment genome: early/mid/late layers get independent mixing&#x27;),
+
+    # ── Tier 3: Penalty Ablation ─────────────────────────────────────────
+    dict(id=&#x27;E08_cka_only&#x27;,      name=&#x27;E08 CKA Penalty Only&#x27;,
+         group=&#x27;Tier 3 — Penalty Ablation&#x27;,
+         fitness_type=&#x27;auc&#x27;,      lambda1=0.50, lambda2=0.00,
+         generations=20, pop_size=25, alpha_mode=&#x27;global&#x27;,   cka_mode=&#x27;final&#x27;,
+         diversity_injection=True,  diversity_patience=5, sigma_base=0.10,
+         description=&#x27;AUC − λ1·CKA only; entropy term removed (λ2=0)&#x27;),
+
+    dict(id=&#x27;E09_entropy_only&#x27;,  name=&#x27;E09 Entropy Penalty Only&#x27;,
+         group=&#x27;Tier 3 — Penalty Ablation&#x27;,
+         fitness_type=&#x27;auc&#x27;,      lambda1=0.00, lambda2=0.25,
+         generations=20, pop_size=25, alpha_mode=&#x27;global&#x27;,   cka_mode=&#x27;final&#x27;,
+         diversity_injection=True,  diversity_patience=5, sigma_base=0.10,
+         description=&#x27;AUC − λ2·Entropy only; CKA term removed (λ1=0)&#x27;),
+
+    dict(id=&#x27;E10_multilayer&#x27;,    name=&#x27;E10 Multi-Layer CKA&#x27;,
+         group=&#x27;Tier 3 — Penalty Ablation&#x27;,
+         fitness_type=&#x27;auc&#x27;,      lambda1=0.30, lambda2=0.15,
+         generations=20, pop_size=25, alpha_mode=&#x27;segment3&#x27;, cka_mode=&#x27;multilayer&#x27;,
+         diversity_injection=True,  diversity_patience=5, sigma_base=0.10,
+         description=&#x27;CKA computed at early+mid+final layers; weighted 0.2+0.3+0.5&#x27;),
+]
+
+# Print overview
+print(f&#x27;{&quot;ID&quot;:&lt;20} {&quot;Group&quot;:&lt;25} {&quot;Fit&quot;:&lt;9} {&quot;λ1&quot;:&lt;5} {&quot;λ2&quot;:&lt;5} {&quot;G&quot;:&lt;4} {&quot;P&quot;:&lt;4} {&quot;Alpha&quot;:&lt;10} {&quot;CKA&quot;}&#x27;)
+print(&#x27;─&#x27;*100)
+for e in EXPERIMENTS:
+    status = &#x27;&#x27;
+    if load_exp_results(CHECKPOINT_DIR, e[&#x27;id&#x27;]):
+        status = &#x27;  ✅ done&#x27;
+    print(f&#x27;{e[&quot;id&quot;]:&lt;20} {e[&quot;group&quot;]:&lt;25} {e[&quot;fitness_type&quot;]:&lt;9} &#x27;
+          f&#x27;{e[&quot;lambda1&quot;]:&lt;5} {e[&quot;lambda2&quot;]:&lt;5} {e[&quot;generations&quot;]:&lt;4} &#x27;
+          f&#x27;{e[&quot;pop_size&quot;]:&lt;4} {e[&quot;alpha_mode&quot;]:&lt;10} {e[&quot;cka_mode&quot;]}{status}&#x27;)
+</pre>
+</div>
+<div class="cell"><strong>22. markdown</strong>
+<div class="markdown"><pre>## Pre-extract Parent 1 Reference Features</pre></div>
+</div>
+<div class="cell"><strong>23. code</strong>
+<pre>log(&#x27;Extracting Parent 1 reference features on full XMAD val set...&#x27;, &#x27;HEAD&#x27;)
+log(&#x27;(This runs once; used by all 10 experiments)&#x27;)
+
+p1_model = RawNet(d_args, device).to(device)
+p1_model.load_state_dict(p1_state)
+p1_model.eval()
+
+p1_feats = extract_reference_features(p1_model, val_loader, device)
+del p1_model
+if device == &#x27;cuda&#x27;: torch.cuda.empty_cache()
+
+for key, tensor in p1_feats.items():
+    log(f&#x27;  {key:6s}: {tuple(tensor.shape)}  (dtype={tensor.dtype})&#x27;)
+
+log(&#x27;Parent 1 features ready.&#x27;, &#x27;OK&#x27;)
+</pre>
+</div>
+<div class="cell"><strong>24. markdown</strong>
+<div class="markdown"><pre>## Run All Experiments
+Each experiment is checkpointed every generation. If already completed, it is loaded from disk and skipped.
+
+&gt; ⚠️ **Timing note**: E01–E04 take ~10–15 min each. E05–E10 take ~1.5–2.5 hours each on a free T4.  
+&gt; Interrupt anytime — the next run will resume from the last completed generation.
+</pre></div>
+</div>
+<div class="cell"><strong>25. code</strong>
+<pre>completed_results = {}   # exp_id → results dict
+
+for cfg in EXPERIMENTS:
+    eid = cfg[&#x27;id&#x27;]
+    sep = &#x27;═&#x27; * 60
+
+    # ── Check for existing results ─────────────────────────────────────
+    existing = load_exp_results(CHECKPOINT_DIR, eid)
+    if existing:
+        completed_results[eid] = existing
+        log(f&#x27;{sep}&#x27;)
+        log(f&#x27;[{cfg[&quot;name&quot;]}] Already completed — loaded from disk.&#x27;, &#x27;OK&#x27;)
+        log(f&#x27;  Best val AUC={existing[&quot;best_val_metrics&quot;][&quot;auc&quot;]:.4f}  &#x27;
+            f&#x27;bal={existing[&quot;best_val_metrics&quot;][&quot;bal_acc&quot;]:.4f}  &#x27;
+            f&#x27;F1={existing[&quot;best_val_metrics&quot;][&quot;f1&quot;]:.4f}&#x27;)
+        continue
+
+    # ── Run experiment ─────────────────────────────────────────────────
+    log(f&#x27;{sep}&#x27;)
+    log(f&#x27;Starting [{cfg[&quot;name&quot;]}]&#x27;, &#x27;HEAD&#x27;)
+    log(f&#x27;  Config: {cfg[&quot;description&quot;]}&#x27;)
+    log(f&#x27;  fitness={cfg[&quot;fitness_type&quot;]}  λ1={cfg[&quot;lambda1&quot;]}  λ2={cfg[&quot;lambda2&quot;]}&#x27;)
+    log(f&#x27;  gens={cfg[&quot;generations&quot;]}  pop={cfg[&quot;pop_size&quot;]}  &#x27;
+        f&#x27;alpha={cfg[&quot;alpha_mode&quot;]}  cka={cfg[&quot;cka_mode&quot;]}&#x27;)
+    log(f&#x27;  diversity_injection={cfg[&quot;diversity_injection&quot;]}&#x27;)
+
+    exp_start = time.time()
+
+    best_val_met, history, best_genome = run_mega_ia(
+        cfg, p1_state, p2_state, d_args, device,
+        val_loader, p1_feats, CHECKPOINT_DIR
+    )
+
+    elapsed = time.time() - exp_start
+    log(f&#x27;[{cfg[&quot;name&quot;]}] Finished in {elapsed/60:.1f} min&#x27;, &#x27;OK&#x27;)
+
+    # ── Save completed results ─────────────────────────────────────────
+    save_exp_results(CHECKPOINT_DIR, eid, best_val_met, history, best_genome)
+    data = load_exp_results(CHECKPOINT_DIR, eid)
+    completed_results[eid] = data
+    log(f&#x27;Results saved to {CHECKPOINT_DIR}/{eid}_results.json&#x27;, &#x27;OK&#x27;)
+
+log(&#x27;&#x27;)
+log(f&#x27;All experiments: {len(completed_results)}/{len(EXPERIMENTS)} completed.&#x27;, &#x27;HEAD&#x27;)
+</pre>
+</div>
+<div class="cell"><strong>26. markdown</strong>
+<div class="markdown"><pre>## Evaluate Best Models on Test Set (Deepfake-Eval-2024)</pre></div>
+</div>
+<div class="cell"><strong>27. code</strong>
+<pre>test_results = {}   # exp_id → test metrics
+
+for cfg in EXPERIMENTS:
+    eid   = cfg[&#x27;id&#x27;]
+    wpath = os.path.join(CHECKPOINT_DIR, f&#x27;{eid}_best_weights.pth&#x27;)
+
+    # ── Check for existing test results ───────────────────────────────
+    existing = load_test_results(CHECKPOINT_DIR, eid)
+    if existing:
+        test_results[eid] = existing
+        log(f&#x27;[{cfg[&quot;name&quot;]}] Test already evaluated — AUC={existing[&quot;auc&quot;]:.4f}&#x27;, &#x27;OK&#x27;)
+        continue
+
+    if not os.path.exists(wpath):
+        log(f&#x27;[{cfg[&quot;name&quot;]}] No weights file found — skip.&#x27;, &#x27;WARN&#x27;)
+        continue
+
+    # ── Load best model and evaluate ─────────────────────────────────
+    log(f&#x27;[{cfg[&quot;name&quot;]}] Evaluating on Deepfake-Eval-2024 test set...&#x27;)
+    model = RawNet(d_args, device).to(device)
+    model.load_state_dict(torch.load(wpath, map_location=device))
+    model.eval()
+
+    all_scores, all_labels = [], []
+    with torch.no_grad():
+        for x, y in tqdm(test_loader, desc=f&#x27;  Test eval {eid}&#x27;, leave=False):
+            out = model(x.to(device), is_test=True)
+            all_scores.append(out[:, 1].cpu().numpy())
+            all_labels.append(y.numpy())
+    del model
+    if device == &#x27;cuda&#x27;: torch.cuda.empty_cache()
+
+    scores = np.concatenate(all_scores)
+    labels = np.concatenate(all_labels)
+    preds  = (scores &gt; 0.5).astype(int)
+
+    tm = full_metrics(labels, preds, scores)
+    tm[&#x27;scores&#x27;] = scores.tolist()
+    tm[&#x27;labels&#x27;] = labels.tolist()
+
+    test_results[eid] = tm
+    save_test_results(CHECKPOINT_DIR, eid, tm)
+    log(f&#x27;  AUC={tm[&quot;auc&quot;]:.4f}  bal={tm[&quot;bal_acc&quot;]:.4f}  &#x27;
+        f&#x27;F1={tm[&quot;f1&quot;]:.4f}  acc={tm[&quot;accuracy&quot;]:.4f}&#x27;, &#x27;OK&#x27;)
+
+log(f&#x27;Test evaluation complete: {len(test_results)}/{len(EXPERIMENTS)} models.&#x27;, &#x27;HEAD&#x27;)
+</pre>
+</div>
+<div class="cell"><strong>28. markdown</strong>
+<div class="markdown"><pre>## Visualization</pre></div>
+</div>
+<div class="cell"><strong>29. code</strong>
+<pre># ── Plot style ──────────────────────────────────────────────────────────────
+plt.rcParams.update({
+    &#x27;figure.facecolor&#x27;: &#x27;white&#x27;, &#x27;axes.facecolor&#x27;: &#x27;#f8f8f8&#x27;,
+    &#x27;axes.grid&#x27;: True, &#x27;grid.color&#x27;: &#x27;#e0e0e0&#x27;, &#x27;grid.linewidth&#x27;: 0.6,
+    &#x27;axes.spines.top&#x27;: False, &#x27;axes.spines.right&#x27;: False,
+    &#x27;font.size&#x27;: 10, &#x27;axes.titlesize&#x27;: 11, &#x27;axes.labelsize&#x27;: 10,
+    &#x27;xtick.labelsize&#x27;: 9, &#x27;ytick.labelsize&#x27;: 9,
+    &#x27;legend.fontsize&#x27;: 8, &#x27;legend.framealpha&#x27;: 0.9,
+})
+
+# Assign each experiment a distinct color
+PALETTE = plt.cm.tab10.colors
+EXP_COLOR = {cfg[&#x27;id&#x27;]: PALETTE[i % 10] for i, cfg in enumerate(EXPERIMENTS)}
+GROUP_STYLE = {
+    &#x27;Tier 1 — Fitness&#x27;:          {&#x27;ls&#x27;: &#x27;-&#x27;,  &#x27;marker&#x27;: &#x27;o&#x27;},
+    &#x27;Tier 2 — Search Budget&#x27;:    {&#x27;ls&#x27;: &#x27;--&#x27;, &#x27;marker&#x27;: &#x27;s&#x27;},
+    &#x27;Tier 3 — Penalty Ablation&#x27;: {&#x27;ls&#x27;: &#x27;:&#x27;,  &#x27;marker&#x27;: &#x27;^&#x27;},
+}
+
+def group_style(grp):
+    return GROUP_STYLE.get(grp, {&#x27;ls&#x27;: &#x27;-&#x27;, &#x27;marker&#x27;: &#x27;o&#x27;})
+
+
+def fig_fitness_curves():
+    &quot;&quot;&quot;Plot best + mean fitness and best AUC per generation for every experiment.&quot;&quot;&quot;
+    n = len(completed_results)
+    if n == 0: return
+    ncols = 2
+    nrows = math.ceil(n / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(14, nrows * 3.5))
+    axes = np.array(axes).flatten()
+
+    for ax_i, cfg in enumerate(EXPERIMENTS):
+        eid = cfg[&#x27;id&#x27;]
+        if eid not in completed_results: continue
+        h   = completed_results[eid][&#x27;history&#x27;]
+        ax  = axes[ax_i]
+        gens = list(range(1, len(h[&#x27;best_fit&#x27;]) + 1))
+        clr = EXP_COLOR[eid]
+
+        ax.plot(gens, h[&#x27;best_fit&#x27;],  color=clr, lw=2,   label=&#x27;Best fitness&#x27;)
+        ax.plot(gens, h[&#x27;mean_fit&#x27;],  color=clr, lw=1.2, ls=&#x27;--&#x27;, alpha=0.7, label=&#x27;Mean fitness&#x27;)
+        ax.plot(gens, h[&#x27;best_auc&#x27;],  color=&#x27;gray&#x27;, lw=1.5, ls=&#x27;:&#x27;,  label=&#x27;Best AUC (val)&#x27;)
+        ax.set_title(f&#x27;{cfg[&quot;name&quot;]}&#x27;, fontweight=&#x27;bold&#x27;)
+        ax.set_xlabel(&#x27;Generation&#x27;)
+        ax.set_ylabel(&#x27;Score&#x27;)
+        ax.legend(loc=&#x27;lower right&#x27;)
+
+    for ax in axes[n:]:
+        ax.set_visible(False)
+    fig.suptitle(&#x27;Fitness Evolution per Experiment&#x27;, fontsize=13, fontweight=&#x27;bold&#x27;, y=1.01)
+    plt.tight_layout()
+    plt.savefig(os.path.join(CHECKPOINT_DIR, &#x27;fig1_fitness_curves.png&#x27;), dpi=150, bbox_inches=&#x27;tight&#x27;)
+    plt.show()
+    log(&#x27;Figure 1 saved: fitness curves.&#x27;, &#x27;OK&#x27;)
+
+
+def fig_val_metrics_evolution():
+    &quot;&quot;&quot;Val balanced-acc, F1, recall per generation for every experiment.&quot;&quot;&quot;
+    n = len(completed_results)
+    if n == 0: return
+    ncols = 2
+    nrows = math.ceil(n / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(14, nrows * 3.5))
+    axes = np.array(axes).flatten()
+
+    for ax_i, cfg in enumerate(EXPERIMENTS):
+        eid = cfg[&#x27;id&#x27;]
+        if eid not in completed_results: continue
+        h   = completed_results[eid][&#x27;history&#x27;]
+        ax  = axes[ax_i]
+        gens = list(range(1, len(h[&#x27;best_fit&#x27;]) + 1))
+        clr = EXP_COLOR[eid]
+
+        ax.plot(gens, h[&#x27;best_bal&#x27;],  color=clr,      lw=2,   label=&#x27;Bal. acc&#x27;)
+        ax.plot(gens, h[&#x27;best_f1&#x27;],   color=&#x27;steelblue&#x27;, lw=1.5, ls=&#x27;--&#x27;, label=&#x27;F1&#x27;)
+        ax.plot(gens, h[&#x27;best_rec&#x27;],  color=&#x27;coral&#x27;,  lw=1.2, ls=&#x27;:&#x27;,  label=&#x27;Recall&#x27;)
+        ax.plot(gens, h[&#x27;best_prec&#x27;], color=&#x27;seagreen&#x27;, lw=1.2, ls=&#x27;-.&#x27;, label=&#x27;Precision&#x27;)
+        ax.set_title(cfg[&#x27;name&#x27;], fontweight=&#x27;bold&#x27;)
+        ax.set_xlabel(&#x27;Generation&#x27;)
+        ax.set_ylabel(&#x27;Metric&#x27;)
+        ax.set_ylim(0, 1.05)
+        ax.legend(loc=&#x27;best&#x27;)
+
+    for ax in axes[n:]:
+        ax.set_visible(False)
+    fig.suptitle(&#x27;Validation Metric Evolution per Experiment&#x27;, fontsize=13, fontweight=&#x27;bold&#x27;, y=1.01)
+    plt.tight_layout()
+    plt.savefig(os.path.join(CHECKPOINT_DIR, &#x27;fig2_val_metrics.png&#x27;), dpi=150, bbox_inches=&#x27;tight&#x27;)
+    plt.show()
+    log(&#x27;Figure 2 saved: val metric curves.&#x27;, &#x27;OK&#x27;)
+
+
+def fig_test_comparison():
+    &quot;&quot;&quot;Grouped bar chart of test metrics for all experiments.&quot;&quot;&quot;
+    if not test_results: return
+    metrics_shown = [&#x27;auc&#x27;, &#x27;bal_acc&#x27;, &#x27;accuracy&#x27;, &#x27;f1&#x27;, &#x27;precision&#x27;, &#x27;recall&#x27;]
+    metric_labels = [&#x27;AUC&#x27;, &#x27;Bal Acc&#x27;, &#x27;Accuracy&#x27;, &#x27;F1&#x27;, &#x27;Precision&#x27;, &#x27;Recall&#x27;]
+
+    exp_list = [cfg for cfg in EXPERIMENTS if cfg[&#x27;id&#x27;] in test_results]
+    names    = [cfg[&#x27;name&#x27;] for cfg in exp_list]
+    n_exp    = len(exp_list)
+    n_met    = len(metrics_shown)
+
+    x = np.arange(n_exp)
+    w = 0.13
+    offsets = np.linspace(-(n_met-1)/2, (n_met-1)/2, n_met) * w
+
+    fig, ax = plt.subplots(figsize=(max(14, n_exp * 1.4), 5))
+    bar_colors = plt.cm.Set2.colors
+
+    for mi, (mkey, mlabel) in enumerate(zip(metrics_shown, metric_labels)):
+        vals = [test_results[cfg[&#x27;id&#x27;]][mkey] for cfg in exp_list]
+        bars = ax.bar(x + offsets[mi], vals, w * 0.9, label=mlabel,
+                      color=bar_colors[mi % len(bar_colors)], alpha=0.85)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(names, rotation=30, ha=&#x27;right&#x27;)
+    ax.set_ylabel(&#x27;Score&#x27;)
+    ax.set_ylim(0, 1.05)
+    ax.axhline(0.5, color=&#x27;red&#x27;, ls=&#x27;--&#x27;, lw=0.8, alpha=0.5, label=&#x27;Random baseline&#x27;)
+    ax.legend(loc=&#x27;upper right&#x27;, ncol=3)
+    ax.set_title(&#x27;Test Set Metrics — All Experiments (Deepfake-Eval-2024)&#x27;, fontweight=&#x27;bold&#x27;)
+
+    # Shade by group
+    group_colors = {&#x27;Tier 1 — Fitness&#x27;: &#x27;#fff3e0&#x27;,
+                    &#x27;Tier 2 — Search Budget&#x27;: &#x27;#e8f5e9&#x27;,
+                    &#x27;Tier 3 — Penalty Ablation&#x27;: &#x27;#e3f2fd&#x27;}
+    prev_grp, grp_start = None, 0
+    for i, cfg in enumerate(exp_list):
+        grp = cfg[&#x27;group&#x27;]
+        if grp != prev_grp:
+            if prev_grp is not None:
+                ax.axvspan(grp_start - 0.5, i - 0.5,
+                           color=group_colors.get(prev_grp, &#x27;white&#x27;), alpha=0.25, zorder=0)
+            grp_start = i
+            prev_grp = grp
+    ax.axvspan(grp_start - 0.5, n_exp - 0.5,
+               color=group_colors.get(prev_grp, &#x27;white&#x27;), alpha=0.25, zorder=0)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(CHECKPOINT_DIR, &#x27;fig3_test_comparison.png&#x27;), dpi=150, bbox_inches=&#x27;tight&#x27;)
+    plt.show()
+    log(&#x27;Figure 3 saved: test comparison bars.&#x27;, &#x27;OK&#x27;)
+
+
+def fig_roc_curves():
+    &quot;&quot;&quot;Overlaid ROC curves on test set.&quot;&quot;&quot;
+    if not test_results: return
+    fig, ax = plt.subplots(figsize=(8, 7))
+    ax.plot([0, 1], [0, 1], &#x27;k--&#x27;, lw=0.8, label=&#x27;Random (AUC=0.50)&#x27;)
+
+    for cfg in EXPERIMENTS:
+        eid = cfg[&#x27;id&#x27;]
+        if eid not in test_results: continue
+        tm = test_results[eid]
+        scores = np.array(tm[&#x27;scores&#x27;])
+        labels = np.array(tm[&#x27;labels&#x27;])
+        fpr, tpr, _ = roc_curve(labels, scores)
+        auc_val = sk_auc(fpr, tpr)
+        gs = group_style(cfg[&#x27;group&#x27;])
+        ax.plot(fpr, tpr, color=EXP_COLOR[eid],
+                lw=1.8, ls=gs[&#x27;ls&#x27;],
+                label=f&#x27;{cfg[&quot;name&quot;]} (AUC={auc_val:.4f})&#x27;)
+
+    ax.set_xlabel(&#x27;False Positive Rate&#x27;)
+    ax.set_ylabel(&#x27;True Positive Rate&#x27;)
+    ax.set_title(&#x27;ROC Curves — Deepfake-Eval-2024 Test Set&#x27;, fontweight=&#x27;bold&#x27;)
+    ax.legend(loc=&#x27;lower right&#x27;, fontsize=7.5)
+    plt.tight_layout()
+    plt.savefig(os.path.join(CHECKPOINT_DIR, &#x27;fig4_roc_curves.png&#x27;), dpi=150, bbox_inches=&#x27;tight&#x27;)
+    plt.show()
+    log(&#x27;Figure 4 saved: ROC curves.&#x27;, &#x27;OK&#x27;)
+
+
+def fig_confusion_matrices():
+    &quot;&quot;&quot;Grid of confusion matrices for all experiments.&quot;&quot;&quot;
+    if not test_results: return
+    exp_list = [cfg for cfg in EXPERIMENTS if cfg[&#x27;id&#x27;] in test_results]
+    n = len(exp_list)
+    ncols = min(5, n)
+    nrows = math.ceil(n / ncols)
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 3, nrows * 3))
+    axes = np.array(axes).flatten()
+
+    for i, cfg in enumerate(exp_list):
+        ax  = axes[i]
+        tm  = test_results[cfg[&#x27;id&#x27;]]
+        cm  = np.array(tm[&#x27;confusion_matrix&#x27;])
+        sns.heatmap(cm, annot=True, fmt=&#x27;d&#x27;, cmap=&#x27;Blues&#x27;, ax=ax,
+                    xticklabels=[&#x27;Pred Real&#x27;, &#x27;Pred Fake&#x27;],
+                    yticklabels=[&#x27;Act Real&#x27;,  &#x27;Act Fake&#x27;],
+                    cbar=False, linewidths=0.5)
+        ax.set_title(cfg[&#x27;name&#x27;], fontsize=8, fontweight=&#x27;bold&#x27;)
+        auc_v = tm[&#x27;auc&#x27;]
+        bal_v = tm[&#x27;bal_acc&#x27;]
+        ax.set_xlabel(f&#x27;AUC={auc_v:.3f}  bal={bal_v:.3f}&#x27;, fontsize=7.5)
+
+    for ax in axes[n:]:
+        ax.set_visible(False)
+    fig.suptitle(&#x27;Confusion Matrices — Deepfake-Eval-2024 Test Set&#x27;,
+                 fontsize=12, fontweight=&#x27;bold&#x27;, y=1.01)
+    plt.tight_layout()
+    plt.savefig(os.path.join(CHECKPOINT_DIR, &#x27;fig5_confusion_matrices.png&#x27;),
+                dpi=150, bbox_inches=&#x27;tight&#x27;)
+    plt.show()
+    log(&#x27;Figure 5 saved: confusion matrices.&#x27;, &#x27;OK&#x27;)
+
+
+def fig_diversity_and_cka():
+    &quot;&quot;&quot;Population diversity + CKA penalty across generations.&quot;&quot;&quot;
+    n = len(completed_results)
+    if n == 0: return
+    ncols = 2
+    nrows = math.ceil(n / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(14, nrows * 3.2))
+    axes = np.array(axes).flatten()
+
+    for ax_i, cfg in enumerate(EXPERIMENTS):
+        eid = cfg[&#x27;id&#x27;]
+        if eid not in completed_results: continue
+        h   = completed_results[eid][&#x27;history&#x27;]
+        ax  = axes[ax_i]
+        gens = list(range(1, len(h[&#x27;best_fit&#x27;]) + 1))
+        clr = EXP_COLOR[eid]
+
+        ax2 = ax.twinx()
+        ax.plot(gens, h[&#x27;diversity&#x27;], color=clr, lw=2, label=&#x27;Population diversity&#x27;)
+        if &#x27;mean_auc&#x27; in h:
+            ax2.plot(gens, h[&#x27;mean_auc&#x27;], color=&#x27;dimgray&#x27;, lw=1.2, ls=&#x27;--&#x27;,
+                     label=&#x27;Mean pop AUC&#x27;)
+        ax.set_title(cfg[&#x27;name&#x27;], fontweight=&#x27;bold&#x27;)
+        ax.set_xlabel(&#x27;Generation&#x27;)
+        ax.set_ylabel(&#x27;Diversity (genome std)&#x27;, color=clr)
+        ax2.set_ylabel(&#x27;Mean pop AUC&#x27;, color=&#x27;dimgray&#x27;)
+        lines1, labs1 = ax.get_legend_handles_labels()
+        lines2, labs2 = ax2.get_legend_handles_labels()
+        ax.legend(lines1 + lines2, labs1 + labs2, loc=&#x27;best&#x27;, fontsize=7.5)
+
+    for ax in axes[n:]:
+        ax.set_visible(False)
+    fig.suptitle(&#x27;Population Diversity &amp; Mean AUC per Generation&#x27;,
+                 fontsize=13, fontweight=&#x27;bold&#x27;, y=1.01)
+    plt.tight_layout()
+    plt.savefig(os.path.join(CHECKPOINT_DIR, &#x27;fig6_diversity.png&#x27;), dpi=150, bbox_inches=&#x27;tight&#x27;)
+    plt.show()
+    log(&#x27;Figure 6 saved: diversity curves.&#x27;, &#x27;OK&#x27;)
+
+
+log(&#x27;All plotting functions defined.&#x27;, &#x27;OK&#x27;)
+</pre>
+</div>
+<div class="cell"><strong>30. markdown</strong>
+<div class="markdown"><pre>## Generate All Figures</pre></div>
+</div>
+<div class="cell"><strong>31. code</strong>
+<pre>log(&#x27;Generating Figure 1: Fitness evolution curves...&#x27;, &#x27;HEAD&#x27;)
+fig_fitness_curves()
+
+log(&#x27;Generating Figure 2: Validation metric evolution...&#x27;, &#x27;HEAD&#x27;)
+fig_val_metrics_evolution()
+
+log(&#x27;Generating Figure 3: Test set comparison bars...&#x27;, &#x27;HEAD&#x27;)
+fig_test_comparison()
+
+log(&#x27;Generating Figure 4: ROC curves...&#x27;, &#x27;HEAD&#x27;)
+fig_roc_curves()
+
+log(&#x27;Generating Figure 5: Confusion matrices...&#x27;, &#x27;HEAD&#x27;)
+fig_confusion_matrices()
+
+log(&#x27;Generating Figure 6: Diversity + mean AUC...&#x27;, &#x27;HEAD&#x27;)
+fig_diversity_and_cka()
+</pre>
+</div>
+<div class="cell"><strong>32. markdown</strong>
+<div class="markdown"><pre>## Final Summary</pre></div>
+</div>
+<div class="cell"><strong>33. code</strong>
+<pre>print()
+print(&#x27;=&#x27; * 110)
+print(f&#x27;  FINAL RESULTS SUMMARY — MeGA-IA Experiments vs Deepfake-Eval-2024 Test Set&#x27;)
+print(&#x27;=&#x27; * 110)
+print(f&#x27;  {&quot;Experiment&quot;:&lt;30} {&quot;Group&quot;:&lt;25} {&quot;AUC&quot;:&gt;6} {&quot;BalAcc&quot;:&gt;7} {&quot;Acc&quot;:&gt;6} &#x27;
+      f&#x27;{&quot;F1&quot;:&gt;6} {&quot;Prec&quot;:&gt;6} {&quot;Rec&quot;:&gt;6}  {&quot;Val AUC&quot;:&gt;8}&#x27;)
+print(&#x27;─&#x27; * 110)
+
+# Sort by test AUC descending (show best first)
+ranked = sorted(
+    [cfg for cfg in EXPERIMENTS if cfg[&#x27;id&#x27;] in test_results],
+    key=lambda c: test_results[c[&#x27;id&#x27;]][&#x27;auc&#x27;], reverse=True
+)
+
+RANK_ICONS = [&#x27;🥇&#x27;, &#x27;🥈&#x27;, &#x27;🥉&#x27;]
+for rank, cfg in enumerate(ranked):
+    eid = cfg[&#x27;id&#x27;]
+    tm  = test_results[eid]
+    vm  = completed_results.get(eid, {}).get(&#x27;best_val_metrics&#x27;, {})
+    icon = RANK_ICONS[rank] if rank &lt; 3 else f&#x27;  {rank+1}.&#x27;
+    print(f&#x27;{icon} {cfg[&quot;name&quot;]:&lt;28} {cfg[&quot;group&quot;]:&lt;25} &#x27;
+          f&#x27;{tm[&quot;auc&quot;]:&gt;6.4f} {tm[&quot;bal_acc&quot;]:&gt;7.4f} {tm[&quot;accuracy&quot;]:&gt;6.4f} &#x27;
+          f&#x27;{tm[&quot;f1&quot;]:&gt;6.4f} {tm[&quot;precision&quot;]:&gt;6.4f} {tm[&quot;recall&quot;]:&gt;6.4f}  &#x27;
+          f&#x27;{vm.get(&quot;auc&quot;, float(&quot;nan&quot;)):&gt;8.4f}&#x27;)
+
+print(&#x27;─&#x27; * 110)
+
+# ── Best experiment ──────────────────────────────────────────────────────────
+if ranked:
+    best = ranked[0]
+    bm   = test_results[best[&#x27;id&#x27;]]
+    print()
+    print(&#x27;🏆 BEST EXPERIMENT:&#x27;, best[&#x27;name&#x27;])
+    print(f&#x27;   Config : {best[&quot;description&quot;]}&#x27;)
+    print(f&#x27;   Test   : AUC={bm[&quot;auc&quot;]:.4f}  BalAcc={bm[&quot;bal_acc&quot;]:.4f}  &#x27;
+          f&#x27;Acc={bm[&quot;accuracy&quot;]:.4f}  F1={bm[&quot;f1&quot;]:.4f}&#x27;)
+    print(f&#x27;   TP={bm[&quot;tp&quot;]}  TN={bm[&quot;tn&quot;]}  FP={bm[&quot;fp&quot;]}  FN={bm[&quot;fn&quot;]}&#x27;)
+
+# ── Tier-level analysis ──────────────────────────────────────────────────────
+print()
+print(&#x27;── PER-TIER BEST PERFORMANCE ─────────────────────────────────────────────&#x27;)
+tiers = {}
+for cfg in EXPERIMENTS:
+    eid = cfg[&#x27;id&#x27;]
+    if eid not in test_results: continue
+    grp = cfg[&#x27;group&#x27;]
+    auc_val = test_results[eid][&#x27;auc&#x27;]
+    if grp not in tiers or auc_val &gt; tiers[grp][&#x27;auc&#x27;]:
+        tiers[grp] = {&#x27;name&#x27;: cfg[&#x27;name&#x27;], &#x27;auc&#x27;: auc_val,
+                      &#x27;bal&#x27;: test_results[eid][&#x27;bal_acc&#x27;],
+                      &#x27;f1&#x27;:  test_results[eid][&#x27;f1&#x27;]}
+
+for grp, info in tiers.items():
+    print(f&#x27;  {grp:&lt;30}  best={info[&quot;name&quot;]:&lt;28}  &#x27;
+          f&#x27;AUC={info[&quot;auc&quot;]:.4f}  bal={info[&quot;bal&quot;]:.4f}  F1={info[&quot;f1&quot;]:.4f}&#x27;)
+
+# ── Biggest improvement from each change ───────────────────────────────────
+print()
+print(&#x27;── IMPACT ANALYSIS ──────────────────────────────────────────────────────&#x27;)
+base_auc = test_results.get(&#x27;E01_original&#x27;, {}).get(&#x27;auc&#x27;, float(&#x27;nan&#x27;))
+print(f&#x27;  Baseline (E01 original MeGA-IA) test AUC: {base_auc:.4f}&#x27;)
+print()
+for cfg in EXPERIMENTS[1:]:
+    eid = cfg[&#x27;id&#x27;]
+    if eid not in test_results: continue
+    delta = test_results[eid][&#x27;auc&#x27;] - base_auc
+    sign  = &#x27;+&#x27; if delta &gt;= 0 else &#x27;&#x27;
+    bar   = &#x27;█&#x27; * int(abs(delta) * 200)
+    print(f&#x27;  {cfg[&quot;name&quot;]:&lt;35}  ΔAUC={sign}{delta:.4f}  {bar}&#x27;)
+
+print()
+print(&#x27;── CHECKPOINTED FILES ────────────────────────────────────────────────────&#x27;)
+for f in sorted(os.listdir(CHECKPOINT_DIR)):
+    fpath = os.path.join(CHECKPOINT_DIR, f)
+    print(f&#x27;  {f:&lt;55}  {os.path.getsize(fpath)/1e3:&gt;8.1f} KB&#x27;)
+
+print()
+print(&#x27;=&#x27; * 110)
+print(&#x27;  All figures saved to:&#x27;, CHECKPOINT_DIR)
+print(&#x27;=&#x27; * 110)
+</pre>
+</div>
+</body></html>
