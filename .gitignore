@@ -19,6 +19,16 @@ datasets/Deepfake-Eval-2024/la_test/real/*
 
 
 ################################
+# GLOBAL AUDIO BAN             #
+################################
+*.wav
+*.flac
+*.mp3
+*.ogg
+*.m4a
+*.au
+
+################################
 # PYTHON & PACKAGE MANAGEMENT  #
 ################################
 __pycache__/
