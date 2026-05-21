@@ -1,6 +1,0 @@
-[submodule "MeGA"]
-	path = MeGA
-	url = https://github.com/YUNBLAK/MeGA-Merging-Multiple-Independently-Trained-Neural-Networks-Based-on-Genetic-Algorithm.git
-[submodule "NPR-DeepfakeDetection"]
-	path = NPR-DeepfakeDetection
-	url = https://github.com/chuangchuangtan/NPR-DeepfakeDetection.git
